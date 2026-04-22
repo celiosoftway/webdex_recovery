@@ -2,10 +2,9 @@ const { ethers } = require("ethers");
 const axios = require("axios");
 require("dotenv").config();
 
-const LPUSDT_ADDRESS = process.env.LPUSDT_ADDRESS;
+const LP_ADDRESS = process.env.LP_ADDRESS;
 const APIKEY = process.env.APIKEY;
 const RPC_1 = process.env.RPC_1;
-const RPC_2 = process.env.RPC_2;
 
 const provider = new ethers.JsonRpcProvider(RPC_1);
 
@@ -37,17 +36,18 @@ async function getTransactions(blocoInicial, blocoFinal, apikey) {
             chainid: '137',
             module: 'account',
             action: 'tokentx',
-            contractaddress: LPUSDT_ADDRESS,
+            contractaddress: LP_ADDRESS,
             sort: 'asc',
             apikey: apikey || APIKEY,
-            startblock: blocoInicial || 85667046,
-            endblock: blocoFinal || 85669498,
+            startblock: blocoInicial || 85662605, //85662618,
+            endblock: blocoFinal || 85677112 //85669498,
         });
 
         const url = `https://api.etherscan.io/v2/api?${params.toString()}`;
         const response = await axios.get(url);
         const data = response.data;
 
+        console.log("\nRealizando consulta na EtherscanV2");
         console.log(url);
 
         if (!data.result || !Array.isArray(data.result)) {
@@ -206,11 +206,12 @@ async function processTransactions(response) {
             timeStamp: Number(tx.timeStamp),
             hash,
             methodId: tx.methodId || null,
+            functionName: tx.functionName || null,
             transactionIndex: Number(tx.transactionIndex)
         });
     }
 
-    console.table(rows);
+    // console.table(rows);
 
     await insertTransactions(rows);
 
@@ -281,6 +282,28 @@ async function processTransactionEvents(txHash) {
     }
 }
 
+
+// ----------------------
+// snapshot
+// ----------------------
+
+const abi = [
+    "function balanceOf(address) view returns (uint256)",
+    "function decimals() view returns (uint8)"
+];
+
+const lp = new ethers.Contract(LP_ADDRESS, abi, provider);
+
+async function getSnapshot(user, blockTag) {
+    const [bal, dec] = await Promise.all([
+        lp.balanceOf(user, { blockTag }),
+        lp.decimals()
+    ]);
+
+    return Number(ethers.formatUnits(bal, dec));
+}
+
+
 module.exports = {
     getIncidentTx,
     parseIncidentTx,
@@ -289,22 +312,7 @@ module.exports = {
     getTransactions,
 
     processTransactions,
-    processTransactionEvents
+    processTransactionEvents,
+
+    getSnapshot
 };
-
-/*
-(async () => {
-   
-  const txHash = "0x3584ece414800eac65374c882289ab908275f804059f826829bb8d6be3d15ea3";
-  const tx = await getTxData(txHash);
-  const data = parseIncidentTx(tx);
-  console.log(JSON.stringify(data, null, 2));
-  
-
-    const transactions = await getTransactions();
-    //const rows = normalizeTransactions(transactions);
-    // console.log(rows);
-    processTransactions(transactions);
-    //console.log(transactions)
-})();
-*/

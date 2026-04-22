@@ -31,32 +31,120 @@ async function testConnection() {
 // --------------------------------------------------
 // INIT
 // --------------------------------------------------
-function initDatabase() {
-    db.serialize(() => {
-        db.run(`
-      CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        blockNumber INTEGER NOT NULL,
-        timeStamp INTEGER NOT NULL,
-        hash TEXT NOT NULL UNIQUE,
-        methodId TEXT,
-        transactionIndex INTEGER,
+function initTransactions() {
+    return new Promise((resolve, reject) => {
+        db.serialize(() => {
+            db.run(`
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    blockNumber INTEGER NOT NULL,
+                    timeStamp INTEGER NOT NULL,
+                    hash TEXT NOT NULL UNIQUE,
+                    methodId TEXT,
+                    functionName TEXT,
+                    transactionIndex INTEGER,
 
-        processed INTEGER DEFAULT 0, -- boolean: 0=false / 1=true
-        status TEXT DEFAULT 'pending'
-          CHECK(status IN ('pending','running','success','error'))
-      )
-    `);
+                    processed INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'pending'
+                    CHECK(status IN ('pending','running','success','error'))
+                )
+            `);
 
-        db.run(`
-      CREATE INDEX IF NOT EXISTS idx_transactions_block
-      ON transactions(blockNumber)
-    `);
+            db.run(`
+                CREATE INDEX IF NOT EXISTS idx_transactions_block
+                ON transactions(blockNumber)
+            `);
 
-        db.run(`
-      CREATE INDEX IF NOT EXISTS idx_transactions_status
-      ON transactions(status)
-    `);
+            db.run(`
+                CREATE INDEX IF NOT EXISTS idx_transactions_status
+                ON transactions(status)
+            `, (err) => {
+                if (err) return reject(err);
+                resolve();
+            });
+        });
+    });
+}
+
+// --------------------------------------------------
+// EVENTS TABLE (OpenPosition)
+// --------------------------------------------------
+function initEventsTable() {
+    return new Promise((resolve, reject) => {
+        db.serialize(() => {
+            db.run(`
+                CREATE TABLE IF NOT EXISTS events_open_position (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    txHash TEXT NOT NULL,
+                    logIndex INTEGER DEFAULT 0,
+
+                    user TEXT NOT NULL,
+                    accountId TEXT NOT NULL,
+                    coin TEXT NOT NULL,
+
+                    oldBalance TEXT DEFAULT '0',
+                    profit TEXT DEFAULT '0',
+                    fee TEXT DEFAULT '0',
+
+                    createdAt INTEGER DEFAULT (strftime('%s','now')),
+
+                    UNIQUE(txHash, logIndex)
+                )
+            `);
+
+            db.run(`
+                CREATE INDEX IF NOT EXISTS idx_events_txhash
+                ON events_open_position(txHash)
+            `);
+
+            db.run(`
+                CREATE INDEX IF NOT EXISTS idx_events_user
+                ON events_open_position(user)
+            `, (err) => {
+                if (err) return reject(err);
+                resolve();
+            });
+        });
+    });
+}
+
+// --------------------------------------------------
+function initSnapshotsTable() {
+    return new Promise((resolve, reject) => {
+        db.serialize(() => {
+            db.run(`
+                CREATE TABLE IF NOT EXISTS user_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    beforeBlock INTEGER NOT NULL,
+                    afterBlock INTEGER NOT NULL,
+
+                    user TEXT NOT NULL,
+
+                    balanceBefore TEXT DEFAULT '0',
+                    balanceAfter TEXT DEFAULT '0',
+                    loss TEXT DEFAULT '0',
+
+                    createdAt INTEGER DEFAULT (strftime('%s','now')),
+
+                    UNIQUE(user, beforeBlock, afterBlock)
+                )
+            `);
+
+            db.run(`
+                CREATE INDEX IF NOT EXISTS idx_snapshots_user
+                ON user_snapshots(user)
+            `);
+
+            db.run(`
+                CREATE INDEX IF NOT EXISTS idx_snapshots_blocks
+                ON user_snapshots(beforeBlock, afterBlock)
+            `, (err) => {
+                if (err) return reject(err);
+                resolve();
+            });
+        });
     });
 }
 
@@ -68,13 +156,14 @@ async function insertTransactions(transactions) {
     return new Promise((resolve, reject) => {
         const stmt = db.prepare(`
       INSERT INTO transactions
-      (blockNumber, timeStamp, hash, methodId, transactionIndex)
-      VALUES (?, ?, ?, ?, ?)
+      (blockNumber, timeStamp, hash, methodId, functionName, transactionIndex)
+      VALUES (?, ?, ?, ?, ?, ?)
 
       ON CONFLICT(hash) DO UPDATE SET
         blockNumber = excluded.blockNumber,
         timeStamp = excluded.timeStamp,
         methodId = excluded.methodId,
+        functionName = excluded.functionName,
         transactionIndex = excluded.transactionIndex
     `);
 
@@ -85,6 +174,7 @@ async function insertTransactions(transactions) {
                     Number(tx.timeStamp),
                     tx.hash,
                     tx.methodId || null,
+                    tx.functionName || null,
                     Number(tx.transactionIndex)
                 );
             }
@@ -172,43 +262,6 @@ async function runQuery(sql, replacements = {}, type = QueryTypes.SELECT) {
 }
 
 
-
-// --------------------------------------------------
-// EVENTS TABLE (OpenPosition)
-// --------------------------------------------------
-function initEventsTable() {
-    db.run(`
-    CREATE TABLE IF NOT EXISTS events_open_position (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-      txHash TEXT NOT NULL,
-      logIndex INTEGER DEFAULT 0,
-
-      user TEXT NOT NULL,
-      accountId TEXT NOT NULL,
-      coin TEXT NOT NULL,
-
-      oldBalance TEXT DEFAULT '0',
-      profit TEXT DEFAULT '0',
-      fee TEXT DEFAULT '0',
-
-      createdAt INTEGER DEFAULT (strftime('%s','now')),
-
-      UNIQUE(txHash, logIndex)
-    )
-  `);
-
-    db.run(`
-    CREATE INDEX IF NOT EXISTS idx_events_txhash
-    ON events_open_position(txHash)
-  `);
-
-    db.run(`
-    CREATE INDEX IF NOT EXISTS idx_events_user
-    ON events_open_position(user)
-  `);
-}
-
 // --------------------------------------------------
 // UPSERT EVENTS
 // events = [
@@ -272,25 +325,66 @@ function upsertOpenPositionEvents(events) {
 }
 
 function updateTransactionStatusByHash(hash, status, processed = 0) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      `
+    return new Promise((resolve, reject) => {
+        db.run(
+            `
       UPDATE transactions
       SET status = ?, processed = ?
       WHERE hash = ?
       `,
-      [status, processed, hash],
-      function (err) {
-        if (err) return reject(err);
-        resolve(this.changes);
-      }
-    );
-  });
+            [status, processed, hash],
+            function (err) {
+                if (err) return reject(err);
+                resolve(this.changes);
+            }
+        );
+    });
+}
+
+
+function upsertUserSnapshots(rows) {
+    return new Promise((resolve, reject) => {
+        const stmt = db.prepare(`
+      INSERT INTO user_snapshots
+      (
+        beforeBlock,
+        afterBlock,
+        user,
+        balanceBefore,
+        balanceAfter,
+        loss
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+
+      ON CONFLICT(user, beforeBlock, afterBlock) DO UPDATE SET
+        balanceBefore = excluded.balanceBefore,
+        balanceAfter = excluded.balanceAfter,
+        loss = excluded.loss
+    `);
+
+        db.serialize(() => {
+            for (const row of rows) {
+                stmt.run(
+                    Number(row.beforeBlock),
+                    Number(row.afterBlock),
+                    row.user.toLowerCase(),
+                    String(row.balanceBefore || "0"),
+                    String(row.balanceAfter || "0"),
+                    String(row.loss || "0")
+                );
+            }
+
+            stmt.finalize(err => {
+                if (err) return reject(err);
+                resolve();
+            });
+        });
+    });
 }
 
 module.exports = {
     db,
-    initDatabase,
+    initTransactions,
     insertTransactions,
     getPendingTransactions,
     updateTransactionStatus,
@@ -301,5 +395,8 @@ module.exports = {
 
     initEventsTable,
     upsertOpenPositionEvents,
-    updateTransactionStatusByHash
+    updateTransactionStatusByHash,
+
+    initSnapshotsTable,
+    upsertUserSnapshots
 };

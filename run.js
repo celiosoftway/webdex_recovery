@@ -1,10 +1,12 @@
 
 const {
     db,
-    initDatabase,
+    initTransactions,
     initEventsTable,
+    initSnapshotsTable,
     testConnection,
-    getPendingTransactions
+    getPendingTransactions,
+    upsertUserSnapshots
 } = require('./db');
 
 const {
@@ -12,7 +14,8 @@ const {
     processTransactions,
     parseIncidentTx,
     getTxData,
-    processTransactionEvents
+    processTransactionEvents,
+    getSnapshot
 } = require('./app');
 
 async function logEventos() {
@@ -24,7 +27,7 @@ async function logEventos() {
         console.log(`📦 Pendentes: ${transactions.length}`);
 
         for (const tx of transactions) {
-            console.log(`⏳ Processando: ${tx.hash}`);
+            console.log(`\n⏳ Processando: ${tx.hash}`);
             await processTransactionEvents(tx.hash);
         }
 
@@ -32,28 +35,165 @@ async function logEventos() {
 
     } catch (error) {
         console.error(error);
-    } finally {
-        db.close();
     }
 }
 
+function getUniqueUsers() {
+    return new Promise((resolve, reject) => {
+        db.all(`
+      SELECT DISTINCT user
+      FROM events_open_position
+    `, [], (err, rows) => {
+            if (err) return reject(err);
+            resolve(rows.map(r => r.user));
+        });
+    });
+}
+
+function closeDatabase() {
+    return new Promise((resolve, reject) => {
+        db.close(err => {
+            if (err) return reject(err);
+            resolve();
+        });
+    });
+}
+
+function deleteLegitTransactions() {
+    return new Promise((resolve, reject) => {
+        db.run(`
+            DELETE FROM transactions
+            WHERE functionName IS NOT NULL
+        `, function (err) {
+            if (err) return reject(err);
+
+            console.log(`🗑️ Removidas ${this.changes} transações legítimas`);
+            resolve(this.changes);
+        });
+    });
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function logUserSnapshots() {
+    const beforeBlock = 85662605;
+    const afterBlock = 85677112;
+
+    const wallets = await getUniqueUsers();
+
+    for (let i = 0; i < wallets.length; i++) {
+        const wallet = wallets[i];
+
+        try {
+            const before = await getSnapshot(wallet, beforeBlock);
+            await sleep(300);
+
+            const after = await getSnapshot(wallet, afterBlock);
+            await sleep(300);
+
+            const loss = Number(before) - Number(after);
+
+            await upsertUserSnapshots([
+                {
+                    beforeBlock,
+                    afterBlock,
+                    user: wallet,
+                    balanceBefore: before.toString(),
+                    balanceAfter: after.toString(),
+                    loss: loss.toFixed(6)
+                }
+            ]);
+
+            console.log(
+                `${i + 1}/${wallets.length}`,
+                wallet,
+                before,
+                after,
+                loss.toFixed(6)
+            );
+
+        } catch (error) {
+            console.error(`❌ Erro ${wallet}:`, error.message);
+            await sleep(2000);
+        }   
+    }
+}
+
+async function criaTabelas() {
+    try {
+        await initTransactions();
+        await sleep(10000);
+        console.log(`✅ Banco de dados inicializado`);
+
+        await initEventsTable();
+        await sleep(10000);
+        console.log(`✅ Tabela de eventos criada`);
+
+        await initSnapshotsTable();
+        await sleep(10000);
+        console.log(`✅ Tabela de snapshots criada`);
+
+        await testConnection();
+        console.log(`✅ Conexão com o banco de dados testada`);
+    } catch (error) {
+        console.error(`❌ Erro ao criar tabelas:`, error);
+    }
+
+}
 
 (async () => {
     try {
+        // ----------------------
+        // cria as tabelas
+        // ----------------------
+
+        await criaTabelas();
+        console.log(`✅ Conexão com o banco de dados estabelecida`);
+
+        // ----------------------
+        // popula a tabela com os hashs de transações
+        // ----------------------
+
+        const transactions = await getTransactions();
+        await processTransactions(transactions);
+        await sleep(2000);
+
+        console.log(`✅ Transações processadas: ${transactions.transactions.length}`);
+
+        // ----------------------
+        // pode ser excluido as transações que functionname for nulo, essa é a caracteristica das
+        // transações do ataque. Isso evita processa transações reais do protocolo
+        // ----------------------
+
+        await deleteLegitTransactions();
+        await sleep(2000);
+
+        console.log(`✅ Transações legítimas excluídas`);
+
+        // ----------------------
+        // Processa os eventos de cada transação
+        // ----------------------
+
         await logEventos();
-        
-        // initDatabase();
-        //initEventsTable();
+        await sleep(2000);
 
-        // const transactions = await getTransactions();
-        // await processTransactions(transactions);
+        console.log(`✅ Eventos processados`);
 
-        // await testConnection();
-        // const txHash = "0x99ff80ac3bf1d7fab8e39c46969f958e6a2062951391b6795e114a7bf1379f13";
-        // await processTransactionEvents(txHash);
+        // ----------------------
+        // Popula snapshot com saldo das carteiras antes e depois do ataque
+        // ----------------------
+
+        await logUserSnapshots();
+
+        console.log(`✅ Snapshots processados`);
 
     } catch (error) {
         console.error(error);
+    } finally {
+        await closeDatabase();
+        console.log(`✅ Conexão com o banco de dados fechada`);
     }
 
 })()
