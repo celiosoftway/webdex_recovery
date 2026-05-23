@@ -145,63 +145,89 @@ function formatTimestamp(timestamp) {
 // =====================================================
 // MAIN
 // =====================================================
-async function salvaTxt(rows,address) {
+async function salvaTxt(rows, address) {
     const fs = require('fs');
 
+    address = address.toLowerCase();
+
+    // transações relacionadas
     const output = rows
-        .filter(r => r.from_address === address)
+        .filter(r =>
+            r.from_address?.toLowerCase() === address ||
+            r.to_address?.toLowerCase() === address
+        )
         .map(r => ({
             data: r.data,
-            from: r.from_address.toLowerCase(),
-            to: r.to_address.toLowerCase(),
+            from: r.from_address?.toLowerCase(),
+            to: r.to_address?.toLowerCase(),
             value: r.value,
         }));
 
     console.table(output);
 
-    // salva em txt/json
+    // =========================
+    // DISTINCT FROM
+    // carteiras que ENVIARAM para o address
+    // =========================
+    const distinctFrom = [
+        ...new Set(
+            output
+                .filter(r => r.to === address)
+                .map(r => r.from)
+                .filter(Boolean)
+        )
+    ];
+
+    // =========================
+    // DISTINCT TO
+    // carteiras que RECEBERAM do address
+    // =========================
+    const distinctTo = [
+        ...new Set(
+            output
+                .filter(r => r.from === address)
+                .map(r => r.to)
+                .filter(Boolean)
+        )
+    ];
+
+    // salva transações completas
     fs.writeFileSync(
-        './resultado.txt',
+        './resultado.json',
         JSON.stringify(output, null, 2),
         'utf-8'
     );
 
-    console.log('✅ Arquivo salvo');
+    // salva distincts
+    fs.writeFileSync(
+        './distinct_from.txt',
+        distinctFrom.join('\n'),
+        'utf-8'
+    );
+
+    fs.writeFileSync(
+        './distinct_to.txt',
+        distinctTo.join('\n'),
+        'utf-8'
+    );
+
+    console.log('✅ Arquivos salvos');
+    console.log(`📥 Recebeu de ${distinctFrom.length} carteiras únicas`);
+    console.log(`📤 Enviou para ${distinctTo.length} carteiras únicas`);
 }
 
 async function main() {
-    const address = '0x3FDFAc21D8B5Cc87bca0c3b332Bf198121dD67d4'.toLowerCase();
+    const address =
+        '0x68c1d8454f3c8bc9a9EB7D4910Aaa67bd687890D'.toLowerCase();
 
     const response = await getTransactions(address, 83891753);
+
     console.log(`Total bruto: ${response.total}`);
     console.log(`Último bloco: ${response.ultimoBloco}`);
 
     const rows = await processTransactions(response);
 
-    const salva = await salvaTxt(rows,address);
-
-    /*
-    console.table(
-        rows.map(r => ({
-            data: r.data,
-            from: r.from_address.toLowerCase(),
-            to: r.to_address,
-            value: r.value,
-        }))
-    );
-
-    console.table(
-        rows
-            .filter(r => r.from_address === address)
-            .map(r => ({
-                data: r.data,
-                from: r.from_address,
-                to: r.to_address,
-                token: r.tokenSymbol,
-                value: r.value,
-            }))
-    );
-    */
+    await salvaTxt(rows, address);
 }
 
 main().catch(console.error);
